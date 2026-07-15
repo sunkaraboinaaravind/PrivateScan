@@ -7,6 +7,10 @@ from app.ai_engine import AIEngine
 # Initialize AI engine
 ai = AIEngine()
 
+# Detect Gradio 6+ version globally
+IS_GRADIO_6 = int(gr.__version__.split(".")[0]) >= 6
+print(f"[PrivateScan] Gradio version: {gr.__version__} (Gradio 6+: {IS_GRADIO_6})")
+
 def load_file(file):
     """Processes uploaded file and extracts text."""
     if file is None:
@@ -42,80 +46,93 @@ def load_file(file):
         return f"❌ Error loading file: {str(e)}", "No text extracted.", gr.update(choices=[]), "", []
 
 def run_analysis(task, model, doc_text):
-    """Runs Summarize, PII, or Key Info analysis."""
+    """Streams Summarize, PII, or Key Info analysis to the UI."""
     print(f"[PrivateScan] Running task '{task}' with model '{model}'")
     if not doc_text or not doc_text.strip():
-        return "⚠️ Please upload a file first."
+        yield "⚠️ Please upload a file first."
+        return
     if not model or model == "No models found! Run 'ollama pull llama3.2'":
-        return "⚠️ Please select a valid Ollama model."
+        yield "⚠️ Please select a valid Ollama model."
+        return
     
+    output_text = ""
     try:
-        response = ai.analyze_document(model, doc_text, task)
-        return response
+        for chunk in ai.analyze_document_stream(model, doc_text, task):
+            output_text += chunk
+            yield output_text
     except Exception as e:
         print(f"[PrivateScan Error] Analysis failed: {str(e)}")
         traceback.print_exc()
-        return f"❌ Error during analysis: {str(e)}"
+        yield f"❌ Error during analysis: {str(e)}"
 
 def chat_respond(user_message, history, model, doc_text):
-    """Answers Q&A chat about the document, supporting both Gradio 5/6 formats."""
+    """Answers Q&A chat with streaming text support."""
     print(f"[PrivateScan Chat] User message: '{user_message}' using model '{model}'")
+    
+    # Initialize history list safely
+    history = history or []
+    
     if not doc_text or not doc_text.strip():
-        if isinstance(history, list) and len(history) > 0 and isinstance(history[0], dict):
-            history.append({"role": "assistant", "content": "⚠️ Please upload a file first."})
+        warning_msg = "⚠️ Please upload a file first."
+        if IS_GRADIO_6:
+            history.append({"role": "assistant", "content": warning_msg})
         else:
-            history = history or []
-            history.append(("", "⚠️ Please upload a file first."))
-        return "", history
+            history.append(("", warning_msg))
+        yield "", history
+        return
         
     if not model or model == "No models found! Run 'ollama pull llama3.2'":
-        if isinstance(history, list) and len(history) > 0 and isinstance(history[0], dict):
-            history.append({"role": "assistant", "content": "⚠️ Please select a valid Ollama model."})
+        warning_msg = "⚠️ Please select a valid Ollama model."
+        if IS_GRADIO_6:
+            history.append({"role": "assistant", "content": warning_msg})
         else:
-            history = history or []
-            history.append(("", "⚠️ Please select a valid Ollama model."))
-        return "", history
+            history.append(("", warning_msg))
+        yield "", history
+        return
 
     # Format history for the AI engine
     engine_history = []
     
-    # Detect Gradio 6 Chatbot history format (list of dicts)
-    is_gradio_6 = False
-    if isinstance(history, list) and len(history) > 0 and isinstance(history[0], dict):
-        is_gradio_6 = True
+    if IS_GRADIO_6:
         for msg in history:
             role = msg.get("role", "user")
             content = msg.get("content", "")
             engine_history.append((role, content))
     else:
-        # Gradio 5 format (list of lists/tuples)
-        history = history or []
         for user_msg, bot_msg in history:
             if user_msg:
                 engine_history.append(("user", user_msg))
             if bot_msg:
                 engine_history.append(("assistant", bot_msg))
 
+    # Append the user's message and a placeholder for assistant response
+    if IS_GRADIO_6:
+        history.append({"role": "user", "content": user_message})
+        history.append({"role": "assistant", "content": "⌛ Thinking..."})
+    else:
+        history.append((user_message, "⌛ Thinking..."))
+    yield "", history
+
     try:
-        # Call AI engine
-        bot_message = ai.ask_question(model, doc_text, user_message, engine_history)
-        
-        # Append response based on Gradio format
-        if is_gradio_6:
-            history.append({"role": "user", "content": user_message})
-            history.append({"role": "assistant", "content": bot_message})
-        else:
-            history.append((user_message, bot_message))
+        bot_message = ""
+        # Stream response
+        for chunk in ai.ask_question_stream(model, doc_text, user_message, engine_history):
+            bot_message += chunk
+            if IS_GRADIO_6:
+                history[-1]["content"] = bot_message
+            else:
+                history[-1] = (user_message, bot_message)
+            yield "", history
             
-        return "", history
     except Exception as e:
         print(f"[PrivateScan Error] Chat failed: {str(e)}")
         traceback.print_exc()
-        if is_gradio_6:
-            history.append({"role": "assistant", "content": f"❌ Error: {str(e)}"})
+        error_msg = f"❌ Error: {str(e)}"
+        if IS_GRADIO_6:
+            history[-1]["content"] = error_msg
         else:
-            history.append((user_message, f"❌ Error: {str(e)}"))
-        return "", history
+            history[-1] = (user_message, error_msg)
+        yield "", history
 
 def check_ollama_status():
     """Checks if Ollama is connected."""
@@ -124,7 +141,6 @@ def check_ollama_status():
         if models:
             return "✅ Connected to Ollama", gr.update(choices=models, value=models[0])
             
-        # Fallback to display pulled models even if list_local_models missed something
         return "⚠️ Connected, but check pulled models.", gr.update(choices=["llama3.2:3b", "qwen2.5-coder:7b"])
     return "❌ Ollama is offline. Start Ollama on your machine first.", gr.update(choices=[])
 
@@ -169,7 +185,7 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="purple", secondary_hue="cyan"),
         analysis_output = gr.Markdown(label="Analysis Results", value="Click an action button above to start analysis.")
 
     with gr.Tab("💬 Ask Document (Local Chat)"):
-        chatbot = gr.Chatbot(label="Document Conversation Chat") # Removed type="messages"
+        chatbot = gr.Chatbot(label="Document Conversation Chat")
         msg_input = gr.Textbox(label="Ask a question about the document", placeholder="What are the key terms mentioned in this document?")
         clear_chat_btn = gr.ClearButton([msg_input, chatbot])
 
