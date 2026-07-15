@@ -1,0 +1,7 @@
+ollama
+PyMuPDF
+Pillow
+python-docx
+pandas
+pytesseract
+openpyxl
