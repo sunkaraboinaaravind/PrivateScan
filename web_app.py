@@ -169,7 +169,7 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="purple", secondary_hue="cyan"),
         analysis_output = gr.Markdown(label="Analysis Results", value="Click an action button above to start analysis.")
 
     with gr.Tab("💬 Ask Document (Local Chat)"):
-        chatbot = gr.Chatbot(label="Document Conversation Chat", type="messages") # Explicit messages type for Gradio 6
+        chatbot = gr.Chatbot(label="Document Conversation Chat") # Removed type="messages"
         msg_input = gr.Textbox(label="Ask a question about the document", placeholder="What are the key terms mentioned in this document?")
         clear_chat_btn = gr.ClearButton([msg_input, chatbot])
 
